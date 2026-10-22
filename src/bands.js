@@ -6,6 +6,7 @@ export const BANDS = {
   500: { name: "500", hex: "#F8BCD0", rgb: [248, 188, 208] }, // pastel pink
   1000: { name: "1000", hex: "#FCE9A0", rgb: [252, 233, 160] }, // pastel yellow
   1500: { name: "1500", hex: "#D9C8F2", rgb: [217, 200, 242] }, // pastel purple
+  3000: { name: "3000", hex: "#DEDEDE", rgb: [222, 222, 222] }, // light grey
 };
 
 export const BAND_KEYS = Object.keys(BANDS);
