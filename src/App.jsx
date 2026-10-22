@@ -1,5 +1,17 @@
-import { useState, useRef } from "react";
-import { jsPDF } from "jspdf";
+import { useState } from "react";
+import { BANDS, BAND_KEYS, BAND_H_MM, detectBand, resolveBand } from "./bands.js";
+import {
+  LABEL_W_MM,
+  LABEL_H_MM,
+  LABELS_PER_PAGE,
+  QR_MM,
+  QR_RIGHT_MM,
+  QR_GAP_MM,
+  parseDescription,
+  shortUrl,
+  qrMatrix,
+  buildLabelsPDF,
+} from "./pdf.js";
 
 const DEFAULT_LABEL = {
   title: "",
@@ -7,6 +19,8 @@ const DEFAULT_LABEL = {
   artist: "",
   description: "",
   price: "",
+  url: "",
+  band: "auto",
 };
 
 const SAMPLE_LABELS = [
@@ -26,32 +40,18 @@ const SAMPLE_LABELS = [
   },
 ];
 
-// Label dimensions in mm (at 300dpi: 1181x827px → ~100x70mm)
-const LABEL_W_MM = 100;
-const LABEL_H_MM = 70;
-const COLS = 3;
-const ROWS = 6;
-const LABELS_PER_PAGE = COLS * ROWS;
-// A3 dimensions in mm
-const A3_W = 297;
-const A3_H = 420;
-
-const parseDescription = (text) => {
-  const parts = [];
-  const regex = /\*([^*]+)\*/g;
-  let lastIndex = 0;
-  let match;
-  while ((match = regex.exec(text)) !== null) {
-    if (match.index > lastIndex) {
-      parts.push({ text: text.slice(lastIndex, match.index), italic: false });
-    }
-    parts.push({ text: match[1], italic: true });
-    lastIndex = regex.lastIndex;
-  }
-  if (lastIndex < text.length) {
-    parts.push({ text: text.slice(lastIndex), italic: false });
-  }
-  return parts;
+// On-screen QR, same grid the PDF draws
+const QRPreview = ({ url, style }) => {
+  const m = qrMatrix(url);
+  if (!m) return null;
+  const n = m.length;
+  let d = "";
+  m.forEach((row, r) => row.forEach((on, c) => { if (on) d += `M${c} ${r}h1v1h-1z`; }));
+  return (
+    <svg viewBox={`0 0 ${n} ${n}`} style={style} shapeRendering="crispEdges">
+      <path d={d} fill="#000" />
+    </svg>
+  );
 };
 
 export default function App() {
@@ -92,109 +92,16 @@ export default function App() {
     setLabels([...labels.slice(0, index + 1), copy, ...labels.slice(index + 1)]);
   };
 
-  // --- PDF Generation using jsPDF directly (no canvas) ---
-
-  const drawLabelPDF = (doc, label, x, y) => {
-    const leftMargin = x + 8;
-    const topStart = y + 14;
-
-    // Line 1: Title — Bold 16pt
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(16);
-    doc.text(label.title, leftMargin, topStart);
-
-    // Line 2: Date — Regular 12pt (tight)
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(12);
-    doc.text(label.date, leftMargin, topStart + 6);
-
-    // Line 3: Artist — Bold 12pt (tight)
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(12);
-    doc.text(label.artist, leftMargin, topStart + 11);
-
-    // Line 4: Description — 6pt with italic support
-    const descY = topStart + 20;
-    doc.setFontSize(6);
-    const parts = parseDescription(label.description);
-    let cursorX = leftMargin;
-    parts.forEach((part) => {
-      doc.setFont("helvetica", part.italic ? "oblique" : "normal");
-      doc.text(part.text, cursorX, descY);
-      cursorX += doc.getTextWidth(part.text);
-    });
-
-    // Line 5: Price — 6pt
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(6);
-    doc.text(label.price, leftMargin, descY + 5);
-
-    // THE LINE branding — bottom right
-    if (showBranding) {
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(12);
-      doc.text("THE LINE", x + LABEL_W_MM - 4, y + LABEL_H_MM - 4, { align: "right" });
-    }
-  };
+  // --- PDF Generation (src/pdf.js, jsPDF directly, no canvas) ---
 
   const generatePDF = () => {
     setGenerating(true);
-
     try {
-      const doc = new jsPDF({
-        orientation: "portrait",
-        unit: "mm",
-        format: "a3",
-      });
-
-      const totalPages = Math.ceil(labels.length / LABELS_PER_PAGE);
-
-      // Center the grid on the page
-      const gridW = COLS * LABEL_W_MM;
-      const gridH = ROWS * LABEL_H_MM;
-      const offsetX = (A3_W - gridW) / 2;
-      const offsetY = (A3_H - gridH) / 2;
-
-      for (let page = 0; page < totalPages; page++) {
-        if (page > 0) doc.addPage("a3", "portrait");
-
-        // Draw dotted cut lines
-        doc.setDrawColor(200, 200, 200);
-        doc.setLineDashPattern([1, 1], 0);
-        doc.setLineWidth(0.2);
-
-        // Vertical lines
-        for (let c = 0; c <= COLS; c++) {
-          const lx = offsetX + c * LABEL_W_MM;
-          doc.line(lx, offsetY, lx, offsetY + gridH);
-        }
-        // Horizontal lines
-        for (let r = 0; r <= ROWS; r++) {
-          const ly = offsetY + r * LABEL_H_MM;
-          doc.line(offsetX, ly, offsetX + gridW, ly);
-        }
-
-        doc.setLineDashPattern([], 0);
-
-        // Draw labels
-        const startIdx = page * LABELS_PER_PAGE;
-        for (let i = 0; i < LABELS_PER_PAGE; i++) {
-          const li = startIdx + i;
-          if (li >= labels.length) break;
-          const col = i % COLS;
-          const row = Math.floor(i / COLS);
-          const lx = offsetX + col * LABEL_W_MM;
-          const ly = offsetY + row * LABEL_H_MM;
-          drawLabelPDF(doc, labels[li], lx, ly);
-        }
-      }
-
-      doc.save("gallery-labels.pdf");
+      buildLabelsPDF(labels, { showBranding }).save("gallery-labels.pdf");
     } catch (err) {
       console.error("PDF generation failed:", err);
       alert("PDF generation failed: " + err.message);
     }
-
     setGenerating(false);
   };
 
@@ -205,7 +112,7 @@ export default function App() {
         className="flex-1 bg-transparent border-b border-neutral-700 text-neutral-100 text-sm py-1 px-0 outline-none focus:border-neutral-400 transition-colors"
         style={{ fontFamily: "'Space Mono', 'Courier New', monospace" }}
         placeholder={placeholder}
-        value={form[key]}
+        value={form[key] ?? ""}
         onChange={(e) => setForm({ ...form, [key]: e.target.value })}
       />
     </div>
@@ -240,7 +147,7 @@ export default function App() {
             disabled={labels.length === 0 || generating}
             className="text-xs uppercase tracking-widest border border-neutral-500 text-neutral-100 px-4 py-2 hover:bg-neutral-800 transition-colors disabled:opacity-30"
           >
-            {generating ? "generating..." : `export pdf (${Math.ceil(labels.length / 18)} pg)`}
+            {generating ? "generating..." : `export pdf (${Math.ceil(labels.length / LABELS_PER_PAGE)} pg)`}
           </button>
         </div>
       </div>
@@ -266,6 +173,11 @@ export default function App() {
                 onClick={() => startEdit(i)}
               >
                 <span className="text-xs opacity-20 w-6 text-right">{String(i + 1).padStart(2, "0")}</span>
+                <span
+                  className="w-2.5 h-2.5 rounded-full shrink-0"
+                  style={{ background: resolveBand(label)?.hex || "transparent", border: resolveBand(label) ? "none" : "1px solid #404040" }}
+                  title={resolveBand(label) ? `band ${resolveBand(label).name}` : "no band"}
+                />
                 <span className="flex-1 text-sm text-neutral-100">{label.title || "Untitled"}</span>
                 <span className="text-xs opacity-40">{label.artist}</span>
                 <span className="text-xs opacity-25">{label.date}</span>
@@ -299,9 +211,36 @@ export default function App() {
             {field("date", "date", "3 Feb 2026")}
             {field("artist", "artist", "MintFace")}
             {field("description", "desc", "Paint on acrylic, 120 x 80cm — *Italic text*")}
-            {field("price", "price", "NZD 6,000 / 1 eth")}
+            {field("price", "price", "NZD 1,000 / 0.25 eth")}
+            {field("url", "url", "mintface.art/10k")}
 
-            <div className="text-xs opacity-20 mt-3 mb-6">wrap text in *asterisks* for italic</div>
+            <div className="flex items-center gap-3 mt-3">
+              <span className="w-24 text-right text-xs opacity-40 shrink-0 uppercase tracking-widest">band</span>
+              <div className="flex gap-1 flex-wrap">
+                {[
+                  { key: "auto", label: `auto${detectBand(form.price) !== "none" ? " · " + detectBand(form.price) : ""}` },
+                  ...BAND_KEYS.map((k) => ({ key: k, label: k })),
+                  { key: "none", label: "none" },
+                ].map((opt) => {
+                  const active = (form.band || "auto") === opt.key;
+                  const swatch = BANDS[opt.key]?.hex;
+                  return (
+                    <button
+                      key={opt.key}
+                      onClick={() => setForm({ ...form, band: opt.key })}
+                      className={`text-xs px-2 py-1 border flex items-center gap-1 transition-colors ${
+                        active ? "border-neutral-300 text-neutral-100" : "border-neutral-800 opacity-50 hover:opacity-80"
+                      }`}
+                    >
+                      {swatch && <span className="w-2 h-2 rounded-full inline-block" style={{ background: swatch }} />}
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="text-xs opacity-20 mt-3 mb-6">wrap text in *asterisks* for italic · band auto-picks from price · url adds a QR</div>
 
             <div className="flex gap-2">
               <button
@@ -330,10 +269,37 @@ export default function App() {
                   ))}
                 </div>
                 <div style={{ fontSize: 8, marginTop: 6, fontWeight: 300 }}>{form.price || "Price"}</div>
+                {form.url && <div style={{ fontSize: 8, marginTop: 6, fontWeight: 300 }}>{shortUrl(form.url)}</div>}
               </div>
-              {showBranding && (
-                <div style={{ fontFamily: "Helvetica, Arial, sans-serif", color: "#000", fontWeight: "bold", fontSize: 13, position: "absolute", textAlign: "right", bottom: 6, right: 8 }}>
-                  THE LINE
+              {form.url && (
+                <QRPreview
+                  url={form.url}
+                  style={{
+                    position: "absolute",
+                    width: `${(QR_MM / LABEL_W_MM) * 100}%`,
+                    right: `${(QR_RIGHT_MM / LABEL_W_MM) * 100}%`,
+                    bottom: `${((BAND_H_MM + QR_GAP_MM) / LABEL_H_MM) * 100}%`,
+                  }}
+                />
+              )}
+              {(resolveBand(form) || showBranding) && (
+                <div
+                  style={{
+                    position: "absolute",
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    height: `${(BAND_H_MM / LABEL_H_MM) * 100}%`,
+                    background: resolveBand(form)?.hex || "transparent",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "flex-end",
+                    paddingRight: 8,
+                  }}
+                >
+                  {showBranding && (
+                    <span style={{ fontFamily: "Helvetica, Arial, sans-serif", color: "#000", fontWeight: "bold", fontSize: 13 }}>THE LINE</span>
+                  )}
                 </div>
               )}
             </div>
