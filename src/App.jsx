@@ -1,5 +1,6 @@
 import { useState, useRef } from "react";
 import { jsPDF } from "jspdf";
+import { BANDS, BAND_H_MM, detectBand, resolveBand } from "./bands";
 
 const DEFAULT_LABEL = {
   title: "",
@@ -7,6 +8,7 @@ const DEFAULT_LABEL = {
   artist: "",
   description: "",
   price: "",
+  band: "auto",
 };
 
 const SAMPLE_LABELS = [
@@ -129,11 +131,18 @@ export default function App() {
     doc.setFontSize(6);
     doc.text(label.price, leftMargin, descY + 5);
 
-    // THE LINE branding — bottom right
+    // Price band — pastel strip across the bottom
+    const band = resolveBand(label);
+    if (band) {
+      doc.setFillColor(...band.rgb);
+      doc.rect(x, y + LABEL_H_MM - BAND_H_MM, LABEL_W_MM, BAND_H_MM, "F");
+    }
+
+    // THE LINE branding — bottom right, centred in the strip
     if (showBranding) {
       doc.setFont("helvetica", "bold");
       doc.setFontSize(12);
-      doc.text("THE LINE", x + LABEL_W_MM - 4, y + LABEL_H_MM - 4, { align: "right" });
+      doc.text("THE LINE", x + LABEL_W_MM - 4, y + LABEL_H_MM - BAND_H_MM / 2 + 1.5, { align: "right" });
     }
   };
 
@@ -158,7 +167,19 @@ export default function App() {
       for (let page = 0; page < totalPages; page++) {
         if (page > 0) doc.addPage("a3", "portrait");
 
-        // Draw dotted cut lines
+        // Draw labels
+        const startIdx = page * LABELS_PER_PAGE;
+        for (let i = 0; i < LABELS_PER_PAGE; i++) {
+          const li = startIdx + i;
+          if (li >= labels.length) break;
+          const col = i % COLS;
+          const row = Math.floor(i / COLS);
+          const lx = offsetX + col * LABEL_W_MM;
+          const ly = offsetY + row * LABEL_H_MM;
+          drawLabelPDF(doc, labels[li], lx, ly);
+        }
+
+        // Draw dotted cut lines (on top of the bands)
         doc.setDrawColor(200, 200, 200);
         doc.setLineDashPattern([1, 1], 0);
         doc.setLineWidth(0.2);
@@ -175,18 +196,6 @@ export default function App() {
         }
 
         doc.setLineDashPattern([], 0);
-
-        // Draw labels
-        const startIdx = page * LABELS_PER_PAGE;
-        for (let i = 0; i < LABELS_PER_PAGE; i++) {
-          const li = startIdx + i;
-          if (li >= labels.length) break;
-          const col = i % COLS;
-          const row = Math.floor(i / COLS);
-          const lx = offsetX + col * LABEL_W_MM;
-          const ly = offsetY + row * LABEL_H_MM;
-          drawLabelPDF(doc, labels[li], lx, ly);
-        }
       }
 
       doc.save("gallery-labels.pdf");
@@ -266,6 +275,11 @@ export default function App() {
                 onClick={() => startEdit(i)}
               >
                 <span className="text-xs opacity-20 w-6 text-right">{String(i + 1).padStart(2, "0")}</span>
+                <span
+                  className="w-2.5 h-2.5 rounded-full shrink-0"
+                  style={{ background: resolveBand(label)?.hex || "transparent", border: resolveBand(label) ? "none" : "1px solid #404040" }}
+                  title={resolveBand(label) ? `band ${resolveBand(label).name}` : "no band"}
+                />
                 <span className="flex-1 text-sm text-neutral-100">{label.title || "Untitled"}</span>
                 <span className="text-xs opacity-40">{label.artist}</span>
                 <span className="text-xs opacity-25">{label.date}</span>
@@ -301,7 +315,35 @@ export default function App() {
             {field("description", "desc", "Paint on acrylic, 120 x 80cm — *Italic text*")}
             {field("price", "price", "NZD 6,000 / 1 eth")}
 
-            <div className="text-xs opacity-20 mt-3 mb-6">wrap text in *asterisks* for italic</div>
+            <div className="flex items-center gap-3 mt-3">
+              <span className="w-24 text-right text-xs opacity-40 shrink-0 uppercase tracking-widest">band</span>
+              <div className="flex gap-1 flex-wrap">
+                {[
+                  { key: "auto", label: `auto${detectBand(form.price) !== "none" ? " · " + detectBand(form.price) : ""}` },
+                  { key: "100", label: "100" },
+                  { key: "250", label: "250" },
+                  { key: "500", label: "500" },
+                  { key: "none", label: "none" },
+                ].map((opt) => {
+                  const active = (form.band || "auto") === opt.key;
+                  const swatch = BANDS[opt.key]?.hex;
+                  return (
+                    <button
+                      key={opt.key}
+                      onClick={() => setForm({ ...form, band: opt.key })}
+                      className={`text-xs px-2 py-1 border flex items-center gap-1 transition-colors ${
+                        active ? "border-neutral-300 text-neutral-100" : "border-neutral-800 opacity-50 hover:opacity-80"
+                      }`}
+                    >
+                      {swatch && <span className="w-2 h-2 rounded-full inline-block" style={{ background: swatch }} />}
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="text-xs opacity-20 mt-3 mb-6">wrap text in *asterisks* for italic · band auto-picks from price</div>
 
             <div className="flex gap-2">
               <button
@@ -331,9 +373,24 @@ export default function App() {
                 </div>
                 <div style={{ fontSize: 8, marginTop: 6, fontWeight: 300 }}>{form.price || "Price"}</div>
               </div>
-              {showBranding && (
-                <div style={{ fontFamily: "Helvetica, Arial, sans-serif", color: "#000", fontWeight: "bold", fontSize: 13, position: "absolute", textAlign: "right", bottom: 6, right: 8 }}>
-                  THE LINE
+              {(resolveBand(form) || showBranding) && (
+                <div
+                  style={{
+                    position: "absolute",
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    height: `${(BAND_H_MM / LABEL_H_MM) * 100}%`,
+                    background: resolveBand(form)?.hex || "transparent",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "flex-end",
+                    paddingRight: 8,
+                  }}
+                >
+                  {showBranding && (
+                    <span style={{ fontFamily: "Helvetica, Arial, sans-serif", color: "#000", fontWeight: "bold", fontSize: 13 }}>THE LINE</span>
+                  )}
                 </div>
               )}
             </div>
